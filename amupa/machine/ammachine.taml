@@ -1,0 +1,80 @@
+# ammachine.taml - Ansible playbook for podman machine initialization
+#
+# Usage:
+#   podman machine init --playbook ./amupa/ammachine.taml am
+#
+# This playbook runs once on first boot of the podman machine VM.
+# It copies am machine scripts to ~/.am/ and sources them from bashrc.
+# Called automatically by am.cmd when machine doesn't exist.
+#
+# To apply changes after machine creation, use: ammachinereset
+
+- name: Configure am podman machine environment
+  hosts: localhost
+  connection: local
+  
+  vars:
+    host_machine_dir: /mnt/c/users/vin/am/amupa/machine
+    am_dir: "{{ ansible_env.HOME }}/.am"
+  
+  tasks:
+    - name: Create ~/.am directory
+      ansible.builtin.file:
+        path: "{{ am_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create ~/.am/gscripts directory
+      ansible.builtin.file:
+        path: "{{ am_dir }}/gscripts"
+        state: directory
+        mode: '0755'
+
+    - name: Copy ammachine.sh
+      ansible.builtin.copy:
+        src: "{{ host_machine_dir }}/ammachine.sh"
+        dest: "{{ am_dir }}/ammachine.sh"
+        mode: '0644'
+        remote_src: yes
+
+    - name: Copy gscripts
+      ansible.builtin.copy:
+        src: "{{ host_machine_dir }}/gscripts/"
+        dest: "{{ am_dir }}/gscripts/"
+        mode: '0755'
+        remote_src: yes
+
+    - name: Fix gscripts permissions
+      ansible.builtin.shell: chmod 755 "{{ am_dir }}/gscripts" && chmod 644 "{{ am_dir }}/gscripts/"*.sh
+
+    - name: Fix line endings in ammachine.sh
+      ansible.builtin.shell: sed -i 's/\r$//' "{{ am_dir }}/ammachine.sh"
+
+    - name: Fix line endings in gscripts
+      ansible.builtin.shell: sed -i 's/\r$//' "{{ am_dir }}/gscripts/"*.sh
+
+    - name: Source ammachine.sh in bashrc
+      ansible.builtin.lineinfile:
+        path: ~/.bashrc
+        line: 'source "$HOME/.am/ammachine.sh"'
+        state: present
+        create: yes
+
+    - name: Display setup complete message
+      ansible.builtin.debug:
+        msg: |
+          am machine setup complete!
+          
+          Scripts installed to ~/.am/
+          
+          Available commands (after opening a new shell or running 'source ~/.bashrc'):
+            upaupa          - Show all commands
+            amdcc           - Toggle dev container
+            amc             - Toggle runtime container
+            amdccupa        - Run tests + release build
+            amupaupa am     - Start dev services
+            amupa am        - Start runtime services
+            upaupa vinvin   - Backup commands
+            ammachinereset - Apply script changes from host
+          
+          See /mnt/c/users/vin/am/amupa/n.md for full documentation.

@@ -1,0 +1,120 @@
+=== CONTAINER DEPENDENCIES (amcontainer/baseContainerfile + Containerfile) ===
+
+--- Base Images / Stages ---
+am-base (Ubuntu 24.04 base)
+  - Defined in: amupa/amcontainer/baseContainerfile
+  - Built once and reused as the base for the runtime container
+  - Only rebuild when you need OS / security updates
+
+builder stage (FROM am-base AS builder)
+  - Defined in: amupa/amcontainer/Containerfile (target "builder")
+  - Installs busybox-static and, when needed, curl + ca-certificates to download ttyd
+  - Assembles a minimal runtime filesystem under /rootfs
+
+final image (FROM scratch)
+  - Defined in: amupa/amcontainer/Containerfile (default target)
+  - Copies /rootfs from the builder into an empty scratch image
+  - Result is a minimal image that contains only the binaries and libs needed to run am + viewer
+
+--- Runtime Dependencies ---
+ttyd (v1.7.7)
+  - Location in image: /usr/local/bin/ttyd
+  - Priority 1: Local custom binary from amupa/amcontainer/upaupaLocal/ttyd (if present)
+  - Priority 2: Downloaded from GitHub releases using:
+    - https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64
+  - Exposes the am TUI over HTTP on port 7681 (ttyd is purely a **container-side** web terminal; the Zig `am` binary itself is unaware of ttyd and just writes to a normal TTY)
+
+dtach (v0.9)
+  - Location in image: /usr/local/bin/dtach
+  - Source: amupa/amcontainer/upaupaLocal/dtach-0.9.tar.gz
+  - Built statically during container build from source tarball (gcc installed temporarily)
+  - Allows am process to persist across browser tab close/reconnect
+  - Used by vv.sh to run am in a detachable session
+
+busybox
+  - Provides /bin/busybox in the image, plus symlinks for sh, cat, cp, mkdir, rm, ls, chmod, date, sleep, kill, stat, basename, dirname, httpd, etc.
+  - Either taken from upaupaLocal/busybox or copied from /bin/busybox-static in the builder
+  - Used both for the shell and for the httpd daemon that serves viewer.html
+
+glibc runtime
+  - libc.so.6, libm.so.6, libpthread.so.0, libdl.so.2, librt.so.1, libz.so.1, and ld-linux-x86-64.so.2
+  - Copied from the builder into /lib/x86_64-linux-gnu and /lib64 in /rootfs
+  - Required by ttyd and busybox
+
+--- Container File Structure (runtime) ---
+In the final image, the relevant layout is:
+
+  /container_upa/
+    gentrypoint.sh       # Container CMD (from upaupaLocal/)
+    vv.sh                # Service control script (from upaupaLocal/)
+    am/                  # Baked-in application tree (from amcontainer/am/)
+      upa/
+        am               # TUI binary (baked in)
+        amconfig         # Installer (baked in)
+        viewer.html      # Web viewer, served on port 8080
+        vin/             # Data directory (baked + mounted for sync)
+
+- Host path `am/` is copied into `/rootfs/container_upa/am/` during the build.
+- At runtime, only `am/upa/vin/` is mounted from the host into `/container_upa/am/upa/vin/` for live SQLite db sync.
+
+--- Ports ---
+7681 - ttyd (am TUI in browser)
+8080 - busybox httpd (viewer.html)
+
+--- Entrypoint and Service Control ---
+gentrypoint.sh
+  - Source: amupa/amcontainer/upaupaLocal/gentrypoint.sh
+  - Location: /container_upa/gentrypoint.sh
+  - Docker/Podman CMD: ["/bin/sh", "/container_upa/gentrypoint.sh"]
+  - Behavior:
+    - Enables `set -e` by default (exits container on errors) unless DEBUG=1
+    - Copies viewer.html to isolated /tmp/am_viewer/index.html
+    - Execs httpd as main process (PID 1) serving viewer on port 8080
+  - Viewer is immediately available when container starts
+  - If httpd fails to start, container exits
+
+vv.sh (am control script)
+  - Source: amupa/amcontainer/upaupaLocal/vv.sh
+  - Location: /container_upa/vv.sh
+  - State machine managing: am process, dtach session, ttyd process
+  - Session persistence: dtach allows am to survive browser tab close/refresh
+  - Control commands (from host):
+    - podman exec amc /container_upa/vv.sh am           # Start am (idempotent)
+    - podman exec amc /container_upa/vv.sh gn           # Stop am gracefully
+    - podman exec amc /container_upa/vv.sh status       # Show state
+    - podman exec amc /container_upa/vv.sh status --upa # Show detailed process info
+    - podman exec amc /container_upa/vv.sh vin          # Show URLs only
+  - For backups, use host-side: upaupa vinvin amc [options]
+  - am command outputs:
+    - "upa: began" - started fresh from not live
+    - "upa: began from partial" - recovered from partial state
+    - "upa: already began" - already running
+    - "upa: exception" - failed to start
+  - gn command outputs:
+    - "upa: stopped" - stopped from live
+    - "upa: stopped from partial" - cleaned up partial state
+    - "upa: already stopped" - nothing was running
+  - status output: "upa: live", "upa: partial", or "upa: not live"
+    - upa: live - all services running (am + dtach + ttyd)
+    - upa: partial - some services running but not all
+    - upa: not live - nothing running
+  - status --upa output: detailed per-process status
+  - vin output: URLs only
+
+--- Summary Package List (builder stage only) ---
+- busybox-static
+- (conditionally) curl + ca-certificates (only when downloading ttyd from GitHub)
+- (conditionally) gcc + libc-dev (only when building dtach from tarball)
+
+No compiler or build tools are present in this container: it only runs the prebuilt am binary plus viewer.html, with `am/upa/vin/` mounted for database persistence.
+
+--- Directory Structure (amupa/amcontainer/) ---
+upaupaLocal/
+  - Runtime scripts copied into the container (gentrypoint.sh, vv.sh)
+  - Local dependency binaries/archives (ttyd, busybox, dtach tarball)
+  - All files here are subject to CRLF→LF conversion during build
+
+amcontainer/ (root)
+  - Build configuration (Containerfile, baseContainerfile, gcontainer.sh)
+  - Build context (am/ directory with prebuilt binaries)
+  - Not copied into the container (except am/)

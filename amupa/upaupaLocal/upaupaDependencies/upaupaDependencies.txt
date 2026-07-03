@@ -1,0 +1,29 @@
+# Upaupa dependencies — build tools + container infrastructure.
+# Used by amdcc only. amc does not need these.
+#
+# Format: name|path|url|version|type|format|download_format
+#   name            = human label
+#   path            = filename in upaupaLocal/
+#   url             = curl fallback (empty = no fallback)
+#   version         = version string (informational)
+#   type            = container destination:
+#                       directory -> /rootfs/usr/local/<name>/
+#                       core      -> /rootfs/bin/<name> (+ symlinks)
+#                       program   -> /rootfs/usr/local/bin/<name>
+#                       script    -> /rootfs/container_upa/gscripts/<name>
+#   format          = local file format: tar, zip, binary, script
+#   download_format = raw download format: tar, zip, binary (empty if no url)
+#
+zig|zig-x86_64-linux-0.14.1.tar.xz|https://ziglaam.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz|0.14.1|directory|tar|tar
+busybox|busybox|https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox|1.37.0-10.1|core|binary|binary
+ttyd|ttyd|https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64|1.7.7|program|binary|binary
+dtach|dtach|https://github.com/crigler/dtach/archive/refs/tags/v0.9.tar.gz|0.9|program|binary|tar
+vv|vv.sh|||script|script|
+run-am|run-am.sh|||script|script|
+upa-code-deps|upa-code-dependencies.sh|||script|script|
+entrypoint-amdcc|gentrypoint-amdcc.sh|||script|script|
+entrypoint-amc|gentrypoint-amc.sh|||script|script|
+paths|paths.sh|||script|script|
+gtest|gtest.sh|||script|script|
+gbuild|gbuild.sh|||script|script|
+gclean|gclean.sh|||script|script|

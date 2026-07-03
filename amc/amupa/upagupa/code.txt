@@ -1,0 +1,36 @@
+=== CODE DEPENDENCIES (am/) ===
+
+The code is prebuilt. This container runs binaries directly.
+
+--- Binaries ---
+am
+  - Main TUI application binary
+  - Located at: am/upa/am
+  - Serves the terminal UI
+
+amconfig
+  - Installer/configurator binary
+  - Located at: am/upa/amconfig
+  - Sets up am as a CLI command (~/.local/bin/am)
+
+--- Data ---
+vin/
+  - Data directory (synced with container)
+  - Located at: am/upa/vin/
+  - Contains: am.db (SQLite database)
+
+--- Viewer ---
+viewer.html
+  - Web-based viewer interface
+  - Generated at container startup by amconfig
+  - Served via HTTP on port 8080
+
+--- File Layout ---
+am/
+├── am.md              # Usage documentation
+└── upa/
+    ├── am             # TUI binary (baked in)
+    ├── amconfig       # Installer binary (baked in)
+    ├── viewer.html    # Generated at runtime by amconfig
+    └── vin/           # Data (mounted from host)
+        └── am.db

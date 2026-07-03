@@ -1,0 +1,599 @@
+# vinvin - diff-based backup and restore functions
+#
+# Structure:
+#   vinvin/<target>/
+#     base/           # initial full snapshot
+#     current/        # always latest state (convenience copy)
+#     patches/        # <hash>.patch.gz files
+#     history.txt     # <hash> <timestamp> <files_changed>
+#
+# Usage:
+#   upaupa vinvin <ngdcc|ngc|ng>              Create diff-based backup
+#   upaupa vinvin restore <target> [hash]     Restore to hash (outputs to snapshots/<hash>/)
+#   upaupa vinvin list <target>               List available restore points
+#   upaupa vinvin images <save|load>          Manage container images
+
+# Check if file is binary (non-diffable)
+_vinvin_is_binary() {
+    local file="$1"
+    # Use file command to check, or check for null bytes
+    if file "$file" 2>/dev/null | grep -qE 'executable|binary|data|ELF'; then
+        return 0
+    fi
+    # Also check for null bytes in first 8KB
+    if head -c 8192 "$file" 2>/dev/null | grep -q $'\x00'; then
+        return 0
+    fi
+    return 1
+}
+
+# Create a patch file for changes between old_dir and new_dir
+# Output: writes patch content to stdout
+_vinvin_create_patch() {
+    local old_dir="$1"
+    local new_dir="$2"
+    local timestamp="$3"
+    
+    local added_files=""
+    local deleted_files=""
+    local changed_files=""
+    local temp_dir=$(mktemp -d)
+    
+    # Find all files in new (added or changed)
+    while IFS= read -r -d '' file; do
+        local rel_path="${file#$new_dir/}"
+        local old_file="$old_dir/$rel_path"
+        
+        if [ ! -e "$old_file" ]; then
+            added_files="$added_files $rel_path"
+        elif ! cmp -s "$file" "$old_file"; then
+            changed_files="$changed_files $rel_path"
+        fi
+    done < <(find "$new_dir" -type f -print0 2>/dev/null)
+    
+    # Find deleted files (in old but not in new)
+    while IFS= read -r -d '' file; do
+        local rel_path="${file#$old_dir/}"
+        local new_file="$new_dir/$rel_path"
+        
+        if [ ! -e "$new_file" ]; then
+            deleted_files="$deleted_files $rel_path"
+        fi
+    done < <(find "$old_dir" -type f -print0 2>/dev/null)
+    
+    # Count changes
+    local n_added=$(echo $added_files | wc -w)
+    local n_deleted=$(echo $deleted_files | wc -w)
+    local n_changed=$(echo $changed_files | wc -w)
+    local total=$((n_added + n_deleted + n_changed))
+    
+    if [ "$total" -eq 0 ]; then
+        rm -rf "$temp_dir"
+        return 1  # No changes
+    fi
+    
+    # Write patch header
+    echo "VINVIN_PATCH_V1"
+    echo "TIMESTAMP: $timestamp"
+    echo "FILES_ADDED: $n_added"
+    echo "FILES_DELETED: $n_deleted"
+    echo "FILES_CHANGED: $n_changed"
+    echo ""
+    
+    # Process deleted files (store old content for restore)
+    for rel_path in $deleted_files; do
+        echo "--- DELETE: $rel_path"
+        local old_file="$old_dir/$rel_path"
+        if _vinvin_is_binary "$old_file"; then
+            echo "TYPE: BINARY"
+            echo "OLD_CONTENT_BASE64:"
+            base64 "$old_file"
+            echo "END_BASE64"
+        else
+            echo "TYPE: TEXT"
+            echo "OLD_CONTENT:"
+            cat "$old_file"
+            echo ""
+            echo "END_OLD_CONTENT"
+        fi
+        echo ""
+    done
+    
+    # Process added files (store new content)
+    for rel_path in $added_files; do
+        echo "--- ADD: $rel_path"
+        local new_file="$new_dir/$rel_path"
+        if _vinvin_is_binary "$new_file"; then
+            echo "TYPE: BINARY"
+            echo "CONTENT_BASE64:"
+            base64 "$new_file"
+            echo "END_BASE64"
+        else
+            echo "TYPE: TEXT"
+            echo "CONTENT:"
+            cat "$new_file"
+            echo ""
+            echo "END_CONTENT"
+        fi
+        echo ""
+    done
+    
+    # Process changed files
+    for rel_path in $changed_files; do
+        echo "--- CHANGE: $rel_path"
+        local old_file="$old_dir/$rel_path"
+        local new_file="$new_dir/$rel_path"
+        
+        if _vinvin_is_binary "$new_file" || _vinvin_is_binary "$old_file"; then
+            # Binary: store full new content (can't diff)
+            echo "TYPE: BINARY"
+            echo "CONTENT_BASE64:"
+            base64 "$new_file"
+            echo "END_BASE64"
+        else
+            # Text: store unified diff only
+            echo "TYPE: TEXT"
+            echo "DIFF:"
+            diff -u "$old_file" "$new_file" 2>/dev/null || true
+            echo "END_DIFF"
+        fi
+        echo ""
+    done
+    
+    rm -rf "$temp_dir"
+    return 0
+}
+
+# Apply patches from base up to target_hash, output to out_dir
+_vinvin_apply_patches_to() {
+    local backup_base="$1"
+    local target_hash="$2"
+    local out_dir="$3"
+    
+    local base_dir="$backup_base/base"
+    local patches_dir="$backup_base/patches"
+    local history_file="$backup_base/history.txt"
+    
+    if [ ! -d "$base_dir" ]; then
+        echo "vinvin: no base snapshot found" >&2
+        return 1
+    fi
+    
+    # Copy base to output
+    mkdir -p "$out_dir"
+    cp -r "$base_dir"/* "$out_dir/" 2>/dev/null || true
+    
+    if [ ! -f "$history_file" ]; then
+        # No patches yet, just base
+        return 0
+    fi
+    
+    # Apply patches in order until we reach target_hash
+    while IFS=' ' read -r hash ts summary; do
+        local patch_file="$patches_dir/$hash.patch.gz"
+        if [ ! -f "$patch_file" ]; then
+            echo "vinvin: missing patch $hash" >&2
+            return 1
+        fi
+        
+        # Apply this patch
+        _vinvin_apply_patch "$patch_file" "$out_dir" || return 1
+        
+        # Stop if we reached target
+        if [ "$hash" = "$target_hash" ]; then
+            break
+        fi
+    done < "$history_file"
+    
+    return 0
+}
+
+# Apply a single patch file to a directory
+_vinvin_apply_patch() {
+    local patch_file="$1"
+    local target_dir="$2"
+    
+    local temp_patch=$(mktemp)
+    gunzip -c "$patch_file" > "$temp_patch" || { rm -f "$temp_patch"; return 1; }
+    
+    local mode="" file_path="" file_type="" collecting=""
+    local content_file=$(mktemp)
+    
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            "--- DELETE: "*)
+                mode="delete"
+                file_path="${line#--- DELETE: }"
+                ;;
+            "--- ADD: "*)
+                mode="add"
+                file_path="${line#--- ADD: }"
+                ;;
+            "--- CHANGE: "*)
+                mode="change"
+                file_path="${line#--- CHANGE: }"
+                ;;
+            "TYPE: BINARY")
+                file_type="binary"
+                ;;
+            "TYPE: TEXT")
+                file_type="text"
+                ;;
+            "CONTENT_BASE64:")
+                collecting="content_b64"
+                > "$content_file"
+                ;;
+            "CONTENT:")
+                collecting="content"
+                > "$content_file"
+                ;;
+            "DIFF:")
+                collecting="diff"
+                > "$content_file"
+                ;;
+            "END_BASE64")
+                if [ "$collecting" = "content_b64" ] || [ "$collecting" = "new_content_b64" ]; then
+                    # Decode and write file
+                    mkdir -p "$(dirname "$target_dir/$file_path")"
+                    base64 -d "$content_file" > "$target_dir/$file_path"
+                fi
+                collecting=""
+                ;;
+            "END_CONTENT")
+                if [ "$collecting" = "content" ]; then
+                    mkdir -p "$(dirname "$target_dir/$file_path")"
+                    # Remove trailing empty line we added
+                    head -c -1 "$content_file" > "$target_dir/$file_path" 2>/dev/null || cat "$content_file" > "$target_dir/$file_path"
+                fi
+                collecting=""
+                ;;
+            "END_DIFF")
+                if [ "$collecting" = "diff" ]; then
+                    # Apply unified diff using patch command
+                    mkdir -p "$(dirname "$target_dir/$file_path")"
+                    patch -s "$target_dir/$file_path" < "$content_file" 2>/dev/null || true
+                fi
+                collecting=""
+                ;;
+            "OLD_CONTENT:"*|"OLD_CONTENT_BASE64:"*|"END_OLD_CONTENT"*)
+                # Skip old content sections during forward apply
+                if [ "$line" = "OLD_CONTENT:" ] || [ "$line" = "OLD_CONTENT_BASE64:" ]; then
+                    collecting="skip"
+                elif [ "$line" = "END_OLD_CONTENT" ]; then
+                    collecting=""
+                fi
+                ;;
+            "")
+                # Empty line - might signal end of a section
+                if [ "$mode" = "delete" ] && [ -n "$file_path" ]; then
+                    rm -f "$target_dir/$file_path"
+                    # Clean up empty parent dirs
+                    local parent="$(dirname "$target_dir/$file_path")"
+                    while [ "$parent" != "$target_dir" ] && [ -d "$parent" ] && [ -z "$(ls -A "$parent" 2>/dev/null)" ]; do
+                        rmdir "$parent" 2>/dev/null || break
+                        parent="$(dirname "$parent")"
+                    done
+                    mode=""
+                    file_path=""
+                fi
+                ;;
+            *)
+                # Content line
+                if [ "$collecting" = "content_b64" ] || [ "$collecting" = "content" ] || [ "$collecting" = "diff" ]; then
+                    echo "$line" >> "$content_file"
+                fi
+                ;;
+        esac
+    done < "$temp_patch"
+    
+    rm -f "$temp_patch" "$content_file"
+    return 0
+}
+
+_upaupa_vinvin() {
+    local target="$1"
+    
+    # Validate target
+    case "$target" in
+        ngdcc|ngc|ng) ;;
+        "")
+            echo "Usage: upaupa vinvin <ngdcc|ngc|ng>"
+            echo "       upaupa vinvin restore <target> [hash]"
+            echo "       upaupa vinvin list <target>"
+            return 1
+            ;;
+        *)
+            echo "upaupa vinvin: unknown target: $target" >&2
+            return 1
+            ;;
+    esac
+    
+    # Set paths based on target
+    local source_dir backup_base
+    case "$target" in
+        ng)
+            source_dir="$ng_loc"
+            backup_base="$ng_loc/vinvin/ng_"
+            ;;
+        ngdcc)
+            source_dir="$ngdcc_loc/ngmounted/ng"
+            backup_base="$ngdcc_loc/vinvin/ng_"
+            ;;
+        ngc)
+            source_dir="$ngc_loc/ngupa/ngcontainer/ng"
+            backup_base="$ngc_loc/vinvin/ng_"
+            ;;
+    esac
+    
+    local base_dir="$backup_base/base"
+    local current_dir="$backup_base/current"
+    local patches_dir="$backup_base/patches"
+    local history_file="$backup_base/history.txt"
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    
+    # Create temp copy of source (excluding vinvin)
+    local temp_new=$(mktemp -d)
+    rsync -a --exclude='vinvin' "$source_dir/" "$temp_new/" || {
+        echo "vinvin: failed to copy source" >&2
+        rm -rf "$temp_new"
+        return 1
+    }
+    
+    # Initialize base if it doesn't exist
+    if [ ! -d "$base_dir" ]; then
+        echo "vinvin: initializing base snapshot..."
+        mkdir -p "$base_dir" "$current_dir" "$patches_dir"
+        cp -r "$temp_new"/* "$base_dir/" 2>/dev/null || true
+        cp -r "$temp_new"/* "$current_dir/" 2>/dev/null || true
+        rm -rf "$temp_new"
+        echo "vinvin: base initialized at $base_dir"
+        return 0
+    fi
+    
+    # Create patch against current
+    local temp_patch=$(mktemp)
+    if ! _vinvin_create_patch "$current_dir" "$temp_new" "$timestamp" > "$temp_patch"; then
+        echo "vinvin: no changes detected"
+        rm -rf "$temp_new" "$temp_patch"
+        return 0
+    fi
+    
+    # Hash the patch
+    local hash=$(sha256sum "$temp_patch" | cut -c1-12)
+    
+    # Compress and store
+    mkdir -p "$patches_dir"
+    gzip -c "$temp_patch" > "$patches_dir/$hash.patch.gz" || {
+        echo "vinvin: failed to store patch" >&2
+        rm -rf "$temp_new" "$temp_patch"
+        return 1
+    }
+    
+    # Get change count from patch header
+    local n_added=$(grep -m1 "^FILES_ADDED:" "$temp_patch" | cut -d' ' -f2)
+    local n_deleted=$(grep -m1 "^FILES_DELETED:" "$temp_patch" | cut -d' ' -f2)
+    local n_changed=$(grep -m1 "^FILES_CHANGED:" "$temp_patch" | cut -d' ' -f2)
+    local summary="+${n_added}/-${n_deleted}/~${n_changed}"
+    
+    # Append to history
+    echo "$hash $timestamp $summary" >> "$history_file"
+    
+    # Update current
+    rm -rf "$current_dir"/*
+    cp -r "$temp_new"/* "$current_dir/" 2>/dev/null || true
+    
+    # Cleanup
+    rm -rf "$temp_new" "$temp_patch"
+    
+    local patch_size=$(du -h "$patches_dir/$hash.patch.gz" | cut -f1)
+    echo "vinvin: $hash ($summary) [$patch_size]"
+}
+
+_upaupa_vinvin_images() {
+    local command="$1"
+    local images_dir="$ng_loc/ngupa/vinvin/images"
+    local images_to_manage=("ng-base" "ngdcc-builder" "ngdcc-image" "ngc-builder" "ngc-image")
+    
+    case "$command" in
+        save)
+            echo "vinvin images: saving to $images_dir"
+            mkdir -p "$images_dir"
+            
+            for img in "${images_to_manage[@]}"; do
+                if podman image exists "$img" 2>/dev/null; then
+                    printf "Save $img? (u/N): "
+                    read -r confirm
+                    if [ "$confirm" = "u" ] || [ "$confirm" = "U" ]; then
+                        echo "  Saving $img..."
+                        podman save -o "$images_dir/$img.tar" "$img"
+                        if [ $? -eq 0 ]; then
+                            echo "  Saved: $images_dir/$img.tar"
+                        else
+                            echo "  Failed to save $img"
+                        fi
+                    else
+                        echo "  Skipped $img"
+                    fi
+                else
+                    echo "  $img not found, skipping"
+                fi
+            done
+            
+            echo "vinvin images: done"
+            ;;
+        load)
+            if [ ! -d "$images_dir" ]; then
+                echo "vinvin images: no saved images found at $images_dir"
+                return 1
+            fi
+            
+            echo "vinvin images: loading from $images_dir"
+            
+            for img in "${images_to_manage[@]}"; do
+                local tar_file="$images_dir/$img.tar"
+                if [ -f "$tar_file" ]; then
+                    printf "Load $img? (u/N): "
+                    read -r confirm
+                    if [ "$confirm" = "u" ] || [ "$confirm" = "U" ]; then
+                        echo "  Loading $img..."
+                        podman load -i "$tar_file"
+                        if [ $? -eq 0 ]; then
+                            echo "  Loaded $img"
+                        else
+                            echo "  Failed to load $img"
+                        fi
+                    else
+                        echo "  Skipped $img"
+                    fi
+                else
+                    echo "  $img.tar not found, skipping"
+                fi
+            done
+            
+            echo "vinvin images: done"
+            ;;
+        "")
+            echo "Usage: upaupa vinvin images <save|load>"
+            return 1
+            ;;
+        *)
+            echo "vinvin images: unknown command: $command (must be save or load)" >&2
+            return 1
+            ;;
+    esac
+}
+
+_upaupa_vinvin_list() {
+    local target="$1"
+    
+    # Validate target
+    case "$target" in
+        ngdcc|ngc|ng) ;;
+        "")
+            echo "Usage: upaupa vinvin list <ngdcc|ngc|ng>"
+            return 1
+            ;;
+        *)
+            echo "vinvin list: unknown target: $target" >&2
+            return 1
+            ;;
+    esac
+    
+    # Set paths based on target
+    local backup_base
+    case "$target" in
+        ng)    backup_base="$ng_loc/vinvin/ng_" ;;
+        ngdcc) backup_base="$ngdcc_loc/vinvin/ng_" ;;
+        ngc)   backup_base="$ngc_loc/vinvin/ng_" ;;
+    esac
+    
+    local history_file="$backup_base/history.txt"
+    local patches_dir="$backup_base/patches"
+    
+    if [ ! -f "$history_file" ]; then
+        if [ -d "$backup_base/base" ]; then
+            echo "vinvin list: base snapshot exists, no patches yet"
+            echo "  base (initial snapshot)"
+        else
+            echo "vinvin list: no backups found for $target"
+        fi
+        return 0
+    fi
+    
+    echo "vinvin list: $target"
+    echo "  base (initial snapshot)"
+    
+    while IFS=' ' read -r hash ts summary; do
+        local patch_file="$patches_dir/$hash.patch.gz"
+        local size="?"
+        if [ -f "$patch_file" ]; then
+            size=$(du -h "$patch_file" | cut -f1)
+        fi
+        echo "  $hash  $ts  $summary  [$size]"
+    done < "$history_file"
+}
+
+_upaupa_vinvin_restore() {
+    local target="$1"
+    local hash="$2"
+    
+    # Validate target
+    case "$target" in
+        ngdcc|ngc|ng) ;;
+        "")
+            echo "Usage: upaupa vinvin restore <ngdcc|ngc|ng> [hash]"
+            echo "       hash can be 'base' for initial snapshot, or a patch hash"
+            echo "       omit hash to restore to latest state"
+            return 1
+            ;;
+        *)
+            echo "vinvin restore: unknown target: $target" >&2
+            return 1
+            ;;
+    esac
+    
+    # Set paths based on target
+    local backup_base
+    case "$target" in
+        ng)    backup_base="$ng_loc/vinvin/ng_" ;;
+        ngdcc) backup_base="$ngdcc_loc/vinvin/ng_" ;;
+        ngc)   backup_base="$ngc_loc/vinvin/ng_" ;;
+    esac
+    
+    local base_dir="$backup_base/base"
+    local current_dir="$backup_base/current"
+    local patches_dir="$backup_base/patches"
+    local history_file="$backup_base/history.txt"
+    local snapshots_dir="$backup_base/snapshots"
+    
+    if [ ! -d "$base_dir" ]; then
+        echo "vinvin restore: no backups found for $target" >&2
+        return 1
+    fi
+    
+    # Determine output directory and what to restore
+    local out_dir
+    local target_hash
+    
+    if [ -z "$hash" ]; then
+        # Restore to latest (just copy current)
+        out_dir="$snapshots_dir/latest"
+        rm -rf "$out_dir"
+        mkdir -p "$out_dir"
+        cp -r "$current_dir"/* "$out_dir/" 2>/dev/null || cp -r "$base_dir"/* "$out_dir/"
+        echo "vinvin restore: latest -> $out_dir"
+        return 0
+    elif [ "$hash" = "base" ]; then
+        # Restore to base
+        out_dir="$snapshots_dir/base"
+        rm -rf "$out_dir"
+        mkdir -p "$out_dir"
+        cp -r "$base_dir"/* "$out_dir/"
+        echo "vinvin restore: base -> $out_dir"
+        return 0
+    else
+        # Restore to specific hash
+        target_hash="$hash"
+        
+        # Verify hash exists in history
+        if ! grep -q "^$target_hash " "$history_file" 2>/dev/null; then
+            echo "vinvin restore: hash '$target_hash' not found in history" >&2
+            echo "Use 'upaupa vinvin list $target' to see available restore points" >&2
+            return 1
+        fi
+        
+        out_dir="$snapshots_dir/$target_hash"
+        rm -rf "$out_dir"
+        mkdir -p "$out_dir"
+        
+        # Apply patches from base up to target_hash
+        if ! _vinvin_apply_patches_to "$backup_base" "$target_hash" "$out_dir"; then
+            echo "vinvin restore: failed to apply patches" >&2
+            rm -rf "$out_dir"
+            return 1
+        fi
+        
+        echo "vinvin restore: $target_hash -> $out_dir"
+        return 0
+    fi
+}

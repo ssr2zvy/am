@@ -1,0 +1,150 @@
+# =============================================================================
+# am Runtime Container
+# =============================================================================
+# Entrypoint: gentrypoint.sh (keeps container alive)
+# Control: vv.sh {am|gn|status|vin} manages ttyd + httpd
+# TUI: http://localhost:7681 | Viewer: http://localhost:8080
+# =============================================================================
+# Build context: amc/amupa/amcontainer/
+# Dependencies: ttyd and busybox in upaupaLocal/
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Builder - Prepare runtime environment
+# -----------------------------------------------------------------------------
+FROM am-base AS builder
+
+ARG TTYD_VERSION=1.7.7
+
+# Ensure local dependency directory exists
+RUN mkdir -p /tmp/local
+
+# Copy local dependencies (synced from amupa/upaupaLocal by upaupa image)
+COPY upaupaLocal/ /tmp/local/
+
+# Install busybox-static only if no local binary was provided
+RUN if [ ! -f /tmp/local/busybox ]; then \
+        echo "No local busybox found, installing from apt" && \
+        apt-get update && apt-get install -y --no-install-recommends busybox-static && \
+        rm -rf /var/lib/apt/lists/*; \
+    else \
+        echo "Using local busybox from upaupaLocal (skipping apt)"; \
+    fi
+
+# ttyd: use local custom binary if exists, otherwise download from GitHub
+RUN mkdir -p /deps && if [ -f /tmp/local/ttyd ]; then \
+        echo "Using local custom ttyd binary" && \
+        cp /tmp/local/ttyd /deps/ttyd; \
+    else \
+        echo "Downloading ttyd v${TTYD_VERSION}..." && \
+        apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+        curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.x86_64" \
+            -o /deps/ttyd && \
+        apt-get purge -y curl ca-certificates && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*; \
+    fi && chmod +x /deps/ttyd
+
+# dtach: use pre-built binary from upaupaLocal (for persistent sessions)
+RUN if [ -f /tmp/local/dtach ]; then \
+        echo "Using pre-built dtach binary" && \
+        cp /tmp/local/dtach /deps/dtach && \
+        chmod +x /deps/dtach; \
+    else \
+        echo "WARNING: dtach binary not found in upaupaLocal/ - persistent sessions disabled"; \
+    fi
+
+# Busybox: use local if exists, otherwise use system busybox-static
+RUN mkdir -p /deps/bin \
+    && if [ -f /tmp/local/busybox ]; then \
+        echo "Using local busybox from upaupaLocal" && \
+        cp /tmp/local/busybox /deps/bin/busybox; \
+    else \
+        echo "Using system busybox-static" && \
+        cp /bin/busybox /deps/bin/busybox; \
+    fi \
+    && chmod +x /deps/bin/busybox
+
+# glibc runtime libraries needed by ttyd
+RUN mkdir -p /deps/lib64 /deps/glibc \
+    && cp /lib/x86_64-linux-gnu/libc.so.6 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libm.so.6 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libpthread.so.0 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libdl.so.2 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/librt.so.1 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libz.so.1 /deps/glibc/ \
+    && cp /lib64/ld-linux-x86-64.so.2 /deps/lib64/
+
+# Prepare complete filesystem structure for scratch image
+RUN mkdir -p /rootfs/bin \
+    && mkdir -p /rootfs/lib/x86_64-linux-gnu \
+    && mkdir -p /rootfs/lib64 \
+    && mkdir -p /rootfs/usr/local/bin \
+    && mkdir -p /rootfs/container_upa/container_mount \
+    && mkdir -p /rootfs/container_upa/gscripts
+
+# Copy busybox and create symlinks for all utilities
+RUN cp /deps/bin/busybox /rootfs/bin/busybox \
+    && chmod +x /rootfs/bin/busybox \
+    && for cmd in sh ash cat cp mkdir rm ls chmod date sleep kill pkill stat basename dirname ps grep httpd; do \
+        ln -s busybox /rootfs/bin/$cmd; \
+    done
+
+# Copy glibc runtime
+RUN cp /deps/glibc/* /rootfs/lib/x86_64-linux-gnu/ \
+    && cp /deps/lib64/* /rootfs/lib64/
+
+# Copy ttyd
+RUN cp /deps/ttyd /rootfs/usr/local/bin/ttyd \
+    && chmod +x /rootfs/usr/local/bin/ttyd
+
+# Copy dtach (for persistent sessions)
+RUN if [ -f /deps/dtach ]; then \
+        cp /deps/dtach /rootfs/usr/local/bin/dtach && \
+        chmod +x /rootfs/usr/local/bin/dtach; \
+    fi
+
+# Copy am application directory (upa/ with binaries extracted by publish.sh)
+# Fail if upa/ doesn't exist - run 'upaupa publish' first
+COPY am/upa/ /rootfs/container_upa/container_mount/am/upa/
+COPY am/am.md /rootfs/container_upa/container_mount/am/am.md
+# Verify binaries exist (tar preserves permissions, no chmod needed)
+RUN test -f /rootfs/container_upa/container_mount/am/upa/am || (echo "ERROR: upa/am not found. Run 'upaupa publish' first." && exit 1)
+RUN test -f /rootfs/container_upa/container_mount/am/upa/amconfig || (echo "ERROR: upa/amconfig not found. Run 'upaupa publish' first." && exit 1)
+# The GGUF model file ships alongside the binaries. upa/llama/g.zig resolves
+# it via selfExePath + sibling lookup, so it must live next to `am`. publish.sh
+# adds upa/*.gguf to the binary tarball; if this check trips, the publish
+# step is missing the model.
+RUN test -f /rootfs/container_upa/container_mount/am/upa/am-model.gguf || (echo "ERROR: upa/am-model.gguf not found. Run 'upaupa publish' first (and ensure am-model.gguf is present in shv/zig-out/bin/upa/)." && exit 1)
+# Ensure vin/ directory exists for sync
+RUN mkdir -p /rootfs/container_upa/container_mount/am/upa/vin
+
+# Scripts from upaupaLocal (synced from amupa/upaupaLocal by upaupa image)
+COPY upaupaLocal/gentrypoint.sh /rootfs/container_upa/gscripts/gentrypoint.sh
+COPY upaupaLocal/vv.sh /rootfs/container_upa/gscripts/vv.sh
+COPY upaupaLocal/paths.sh /rootfs/container_upa/gscripts/paths.sh
+COPY upaupaLocal/run-am.sh /rootfs/container_upa/run-am.sh
+# Fix line endings (Windows CRLF -> Unix LF)
+RUN sed -i 's/\r$//' /rootfs/container_upa/gscripts/*.sh /rootfs/container_upa/run-am.sh
+RUN chmod +x /rootfs/container_upa/gscripts/*.sh /rootfs/container_upa/run-am.sh
+
+# -----------------------------------------------------------------------------
+# Stage 2: Slim runtime - Minimal scratch-based image
+# -----------------------------------------------------------------------------
+FROM scratch
+
+# Copy entire pre-built filesystem from builder
+COPY --from=builder /rootfs/ /
+
+WORKDIR /container_upa
+
+# Set HOME to working directory and add ~/.local/bin to PATH
+# This mimics standard Linux behavior where ~/.local/bin is in PATH
+ENV HOME=/container_upa
+ENV PATH="/container_upa/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Port 7681: ttyd (am TUI)
+# Port 8080: busybox httpd (viewer.html)
+EXPOSE 7681 8080
+
+# Entrypoint: gentrypoint keeps container alive for manual service control
+# Control services via: podman exec amc /container_upa/gscripts/vv.sh {am|gn|status|vin}
+CMD ["/bin/sh", "/container_upa/gscripts/gentrypoint.sh"]

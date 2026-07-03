@@ -1,0 +1,177 @@
+# =============================================================================
+# am Development Container
+# =============================================================================
+# Entrypoint: gentrypoint.sh (sets up deps, keeps container alive)
+# Control: vv.sh {am|gn|status|vin} manages ttyd + httpd
+# TUI: http://localhost:7681 | Viewer: http://localhost:8080
+# Working dir: /container_upa/
+# Mount: am-mount-host/ -> /container_upa/container_mount/
+#   (host workspace under amdcc/am-mount-host/ contains am/{shv,build-output,...})
+# =============================================================================
+# Dependencies driven by upaupaLocal/dependencies.txt
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 1: Builder
+# -----------------------------------------------------------------------------
+FROM am-base AS builder
+
+# Copy local dependencies + dependencies.txt manifest
+RUN mkdir -p /tmp/local
+COPY upaupaLocal/ /tmp/local/
+
+# Install apt packages. curl + ca-certificates only if any dep is missing
+# locally (checked by looping both manifests).
+RUN PKGS="xz-utils unzip git" && \
+    NEEDS_CURL=$(cat /tmp/local/upaupaDependencies.txt /tmp/local/upaDependencies.txt | tr -d '\r' | while IFS='|' read -r n p u v t f df; do \
+        case "$n" in '#'*|'') continue ;; esac; \
+        [ -z "$p" ] && continue; \
+        if [ -n "$u" ] && [ ! -f "/tmp/local/$p" ]; then echo yes; break; fi; \
+    done) && \
+    if [ "$NEEDS_CURL" = "yes" ]; then \
+        PKGS="$PKGS curl ca-certificates"; \
+    fi && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends $PKGS && \
+    rm -rf /var/lib/apt/lists/*
+
+# --- Bring in all dependencies: local file -> curl fallback -> hard fail ---
+RUN cat /tmp/local/upaupaDependencies.txt /tmp/local/upaDependencies.txt | tr -d '\r' | while IFS='|' read -r name path url version type format download_format; do \
+        case "$name" in '#'*|'') continue ;; esac; \
+        [ -z "$path" ] && continue; \
+        [ "$type" = "script" ] && continue; \
+        if [ -f "/tmp/local/$path" ]; then \
+            echo "Using local $name ($path)"; \
+        elif [ -n "$url" ]; then \
+            echo "Downloading $name from $url..." && \
+            curl -fsSL "$url" -o "/tmp/local/$path" || exit 1; \
+        else \
+            echo "ERROR: $name missing ($path) and no url" && exit 1; \
+        fi; \
+    done
+
+# --- App dep post-processing: sqlite extraction ---
+RUN SQLITE_PATH=$(tr -d '\r' < /tmp/local/upaDependencies.txt | grep '^sqlite|' | cut -d'|' -f2) && \
+    SQLITE_DIR="${SQLITE_PATH%.zip}" && \
+    mkdir -p /tmp/local/sqlite && \
+    unzip -q "/tmp/local/$SQLITE_PATH" -d /tmp && \
+    cp /tmp/${SQLITE_DIR}/sqlite3.c /tmp/local/sqlite/ && \
+    cp /tmp/${SQLITE_DIR}/sqlite3.h /tmp/local/sqlite/ && \
+    cp /tmp/${SQLITE_DIR}/sqlite3ext.h /tmp/local/sqlite/ && \
+    cp "/tmp/local/$SQLITE_PATH" /tmp/local/sqlite/ && \
+    rm -rf /tmp/${SQLITE_DIR}
+
+# --- App dep post-processing: llama.cpp extraction + GPU backend strip ---
+RUN LLAMA_PATH=$(tr -d '\r' < /tmp/local/upaDependencies.txt | grep '^llama-cpp|' | cut -d'|' -f2) && \
+    mkdir -p /tmp/local/llama /tmp/llama-extract && \
+    tar -xzf "/tmp/local/$LLAMA_PATH" -C /tmp/llama-extract --strip-components=1 && \
+    cp -r /tmp/llama-extract/include /tmp/local/llama/include && \
+    cp -r /tmp/llama-extract/src     /tmp/local/llama/src && \
+    cp -r /tmp/llama-extract/ggml    /tmp/local/llama/ggml && \
+    rm -rf /tmp/local/llama/ggml/src/ggml-blas \
+           /tmp/local/llama/ggml/src/ggml-cann \
+           /tmp/local/llama/ggml/src/ggml-cuda \
+           /tmp/local/llama/ggml/src/ggml-hexagon \
+           /tmp/local/llama/ggml/src/ggml-metal \
+           /tmp/local/llama/ggml/src/ggml-opencl \
+           /tmp/local/llama/ggml/src/ggml-rpc \
+           /tmp/local/llama/ggml/src/ggml-sycl \
+           /tmp/local/llama/ggml/src/ggml-virtgpu \
+           /tmp/local/llama/ggml/src/ggml-vulkan \
+           /tmp/local/llama/ggml/src/ggml-webgpu \
+           /tmp/local/llama/ggml/src/ggml-zdnn \
+           /tmp/local/llama/ggml/src/ggml-zendnn && \
+    rm -f /tmp/local/llama/ggml/src/ggml-backend-dl.cpp && \
+    rm -rf /tmp/llama-extract
+
+# --- Git (from apt, not dependencies.txt — it's a system package) ---
+RUN mkdir -p /deps/git/bin /deps/git/lib /deps/git/share \
+    && cp /usr/bin/git /deps/git/bin/ \
+    && cp -r /usr/lib/git-core /deps/git/lib/git-core 2>/dev/null || true \
+    && cp -r /usr/share/git-core /deps/git/share/git-core 2>/dev/null || true
+
+# --- glibc runtime (needed by ttyd, git) ---
+RUN mkdir -p /deps/lib64 /deps/glibc \
+    && cp /lib/x86_64-linux-gnu/libc.so.6 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libm.so.6 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libpthread.so.0 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libdl.so.2 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/librt.so.1 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libz.so.1 /deps/glibc/ \
+    && cp /lib/x86_64-linux-gnu/libselinux.so.1 /deps/glibc/ 2>/dev/null || true \
+    && cp /lib/x86_64-linux-gnu/libpcre2-8.so.0 /deps/glibc/ 2>/dev/null || true \
+    && cp /lib64/ld-linux-x86-64.so.2 /deps/lib64/
+
+# --- Build /rootfs/ from dependencies.txt type column ---
+RUN mkdir -p /rootfs/bin /rootfs/lib/x86_64-linux-gnu /rootfs/lib64 \
+    /rootfs/usr/local/bin /rootfs/usr/bin \
+    /rootfs/usr/lib/git-core /rootfs/usr/share/git-core \
+    /rootfs/container_upa/container_mount \
+    /rootfs/container_upa/upa/sqlite_files \
+    /rootfs/container_upa/upa/llama_files \
+    /rootfs/container_upa/upa/model_files \
+    /rootfs/container_upa/gscripts
+
+# Place deps into /rootfs/ based on type
+RUN cat /tmp/local/upaupaDependencies.txt /tmp/local/upaDependencies.txt | tr -d '\r' | while IFS='|' read -r name path url version type format download_format; do \
+        case "$name" in '#'*|'') continue ;; esac; \
+        [ -z "$path" ] && continue; \
+        case "$type" in \
+            directory) \
+                mkdir -p "/rootfs/usr/local/$name" && \
+                tar -xf "/tmp/local/$path" -C "/rootfs/usr/local/$name" --strip-components=1 && \
+                ln -sf "/usr/local/$name/$name" "/rootfs/usr/local/bin/$name" ;; \
+            core) \
+                cp "/tmp/local/$path" "/rootfs/bin/$name" && \
+                chmod +x "/rootfs/bin/$name" && \
+                for cmd in sh ash cat cp mkdir rm ls chmod date sleep kill pkill stat basename dirname ps grep httpd; do \
+                    ln -sf "$name" "/rootfs/bin/$cmd"; \
+                done ;; \
+            program) \
+                cp "/tmp/local/$path" "/rootfs/usr/local/bin/$name" && \
+                chmod +x "/rootfs/usr/local/bin/$name" ;; \
+            script) \
+                case "$name" in \
+                    entrypoint-amc) ;; \
+                    entrypoint-amdcc) cp "/tmp/local/gentrypoint.sh" "/rootfs/container_upa/gscripts/gentrypoint.sh" ;; \
+                    *) cp "/tmp/local/$path" "/rootfs/container_upa/gscripts/$path" ;; \
+                esac ;; \
+        esac; \
+    done
+
+# Scripts: fix CRLF + set executable
+RUN test -f /rootfs/container_upa/gscripts/gentrypoint.sh || (echo "ERROR: missing /container_upa/gscripts/gentrypoint.sh (check upaupa image sync)" && exit 1) && \
+    sed -i 's/\r$//' /rootfs/container_upa/gscripts/*.sh && \
+    chmod +x /rootfs/container_upa/gscripts/*.sh
+
+# Place app deps into /rootfs/container_upa/upa/
+RUN cp -r /tmp/local/sqlite/* /rootfs/container_upa/upa/sqlite_files/ 2>/dev/null || true && \
+    cp -r /tmp/local/llama/include /rootfs/container_upa/upa/llama_files/include && \
+    cp -r /tmp/local/llama/src     /rootfs/container_upa/upa/llama_files/src && \
+    cp -r /tmp/local/llama/ggml    /rootfs/container_upa/upa/llama_files/ggml && \
+    MODEL_PATH=$(tr -d '\r' < /tmp/local/upaDependencies.txt | grep '^model|' | cut -d'|' -f2) && \
+    cp "/tmp/local/$MODEL_PATH" "/rootfs/container_upa/upa/model_files/$MODEL_PATH"
+
+# glibc + git into /rootfs/
+RUN cp /deps/glibc/* /rootfs/lib/x86_64-linux-gnu/ && \
+    cp /deps/lib64/* /rootfs/lib64/ && \
+    cp /deps/git/bin/git /rootfs/usr/bin/ && \
+    cp -r /deps/git/lib/git-core/* /rootfs/usr/lib/git-core/ && \
+    cp -r /deps/git/share/git-core/* /rootfs/usr/share/git-core/ && \
+    chmod +x /rootfs/usr/bin/git
+
+# -----------------------------------------------------------------------------
+# Stage 2: Slim runtime
+# -----------------------------------------------------------------------------
+FROM scratch
+
+COPY --from=builder /rootfs/ /
+
+WORKDIR /container_upa
+
+ENV HOME=/container_upa
+ENV PATH="/container_upa/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+EXPOSE 7681
+
+CMD ["/bin/sh", "/container_upa/gscripts/gentrypoint.sh"]

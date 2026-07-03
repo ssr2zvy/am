@@ -1,0 +1,16 @@
+# Upa dependencies — what the am binary links/uses.
+# Used by both amdcc (to build) and amc (at runtime for the model).
+#
+# Format: name|path|url|version|type|format|download_format
+#   name            = human label
+#   path            = filename in upaupaLocal/
+#   url             = curl fallback (empty = no fallback)
+#   version         = version string (informational)
+#   type            = container destination:
+#                       app -> /rootfs/container_upa/upa/
+#   format          = local file format: tar, zip, binary
+#   download_format = raw download format: tar, zip, binary
+#
+sqlite|sqlite-amalgamation-3530300.zip|https://www.sqlite.org/2026/sqlite-amalgamation-3530300.zip|3.53.3|app|zip|zip
+llama-cpp|llama-cpp-b8146.tar.gz|https://github.com/ggml-org/llama.cpp/archive/refs/tags/b8146.tar.gz|b8146|app|tar|tar
+model|am-model.gguf|https://huggingface.co/unsloth/Phi-4-mini-instruct-GGUF/resolve/main/Phi-4-mini-instruct-Q4_K_M.gguf|phi-4-mini-instruct-q4_k_m|app|binary|binary

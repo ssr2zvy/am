@@ -1,0 +1,26 @@
+# amdcc Environment Dependencies — host-side-only scripts for the amdcc project.
+# These are never baked into any container image (unlike upaupaDependencies /
+# upaDependencies) because their logic (podman exec / podman build against a
+# running or existing container) can only run on the host, not inside the
+# container itself. One manifest per project; this one is amdcc-specific.
+#
+# Format: name|path|destinationPath|version|type
+#   name            = human label
+#   path            = current source location (absolute)
+#   destinationPath = where this script is actually invoked from (absolute;
+#                      identical to path for entries not relocated in this pass)
+#   version         = version string (informational; currently unused)
+#   type            = host-script (all entries; never placed into a container)
+#
+# container-build-tool was relocated here from amdcc/container-build/gu.sh
+# and now takes --container <name> instead of hardcoding "amdcc".
+# gcontainer, amdcc, amdccupa, and amupaupa are cataloged at their current,
+# unchanged locations (not yet relocated) pending a decision on whether a
+# sync mechanism (like image.sh for upaupaDependencies/upaDependencies) is
+# needed before moving them.
+#
+container-build-tool|C:\Users\vin\am\amupa\upaupaLocal\environmentDependencies\container-build-tool.sh|C:\Users\vin\am\amdcc\container-build||host-script
+gcontainer|C:\Users\vin\am\amdcc\container-build\amcontainer\gcontainer.sh|C:\Users\vin\am\amdcc\container-build\amcontainer||host-script
+amdcc|C:\Users\vin\am\amupa\machine\gscripts\amdcc.sh|C:\Users\vin\am\amupa\machine\gscripts||host-script
+amdccupa|C:\Users\vin\am\amupa\machine\gscripts\amdccupa.sh|C:\Users\vin\am\amupa\machine\gscripts||host-script
+amupaupa|C:\Users\vin\am\amupa\machine\gscripts\amupaupa.sh|C:\Users\vin\am\amupa\machine\gscripts||host-script

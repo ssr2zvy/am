@@ -1,0 +1,40 @@
+# Host platform versions. Owned exclusively by am-upa.ps1 (initial install)
+# and am-u.ps1 (update) on the Windows host. Each tool is described by a
+# (version, URL) pair; am-upa.ps1 prefers the package manager (winget /
+# Microsoft Store) and only falls back to the URL when the package source
+# is unavailable.
+#
+# Container-build vendored archives live in a separate file at
+# amupa/upaupaLocal/versions.txt, owned by image.sh + gcontainer.sh.
+#
+# WSL 2.7.10 (latest stable on github.com/microsoft/WSL, released
+# 2026-06-26) includes CVE-2026-26127 (.NET runtime DoS, fixed in 2.7.1
+# via .NET bump 10.0.0 â†’ 10.0.4) and CVE-2026-32178 (.NET runtime, fixed
+# in 2.7.3 via .NET bump to 10.0.6). Podman 5.8.4 includes the full
+# stack of recent advisories: CVE-2026-33414 (HyperV PowerShell command
+# injection on Windows, fixed in 5.8.2, GHSA-hc8w-h2mf-hp59),
+# CVE-2026-44517 (Buildah ADD/COPY build-context escape via malicious
+# Git/tar, fixed in 5.8.3, GHSA-49p4-px3h-rq49), and CVE-2026-57231
+# (malformed image env var leak from host to container, fixed in 5.8.4,
+# GHSA-4hq8-gpf5-8p68). All five CVEs and the "fixed in" version
+# mappings here were re-verified against the upstream release notes and
+# NVD on 2026-06-30 before the gn upa / am -upa run.
+WSL=2.7.10
+WSL_URL=https://github.com/microsoft/WSL/releases/download/2.7.10/Microsoft.WSL_2.7.10.0_x64_ARM64.msixbundle
+
+Podman=5.8.4
+Podman_URL=https://github.com/containers/podman/releases/download/v5.8.4/podman-5.8.4-setup.exe
+
+# Podman machine (WSL VM) resource pins. The defaults of 2 GB / 1 CPU
+# are too small for the embedded LLM (`am flow`): the GGUF pinned in
+# upaupaLocal/versions.txt is ~2.5 GB on disk with a ~3 GB peak working
+# set at 4K ctx, so the VM must be at least 4 GB and we set 8 GB to also
+# leave room for Zig compile workloads in amdcc. Both `am pm` and
+# `am -u` pass these to `podman machine init` (amupa/upaupa/am-pm.ps1
+# and am-u.ps1). The per-container caps (`--memory 6g`) live in each
+# amcontainer/gcontainer.sh. These are notes only â€” the PowerShell
+# scripts hard-code the equivalent values, so changing them here also
+# requires updating the two ps1 callsites.
+AMMACHINE_MEMORY_MB=8192
+AMMACHINE_CPUS=4
+AMCONTAINER_MEMORY=6g

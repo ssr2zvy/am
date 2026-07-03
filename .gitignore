@@ -1,0 +1,26 @@
+# Generated caches/build outputs
+**/.cache/
+**/.zig-cache/
+**/zig-out/
+**/build-output/
+
+# Runtime pid/socket/log artifacts
+**/.httpd.pid
+**/.ttyd.pid
+**/.am.dtach
+**/.am.lock
+**/*.pid
+**/*.log
+
+# Local backup/snapshot system artifacts
+**/vinvin/
+**/.snap.*/
+**/*.patch.gz
+
+# Large model/binary payloads not suitable for standard git push
+**/*.gguf
+**/*.tar
+**/*.tar.xz
+**/*.tar.gz
+**/*.zip
+

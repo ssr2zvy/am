@@ -1,0 +1,11 @@
+# =============================================================================
+# am Base Image (shared between amdcc and amc)
+# =============================================================================
+# This is built once and reused. Only rebuild when base OS needs updating.
+# Image name: am-base
+# =============================================================================
+
+FROM ubuntu:24.04
+
+# Apply security patches to address CVEs
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*

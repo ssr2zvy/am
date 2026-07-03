@@ -1,0 +1,16 @@
+for me to run not for you to run:
+current state: I saved the base image and then did gn -pm
+am -pm to make the machine with the playbook
+am to ssh into podman machine
+run upaupa vinvin images load --> this will lead to a confirmation prompt, ONLY load the am-base.
+run amreset amdcc and amreset amc with the --binaries --viewer and --amd
+upaupa image to sync upaupaLocal
+run amdcc image --builder --> this builds the image from builder AND it starts the container, so now amdcc is running
+run amdccupa to build
+run amupaupa am and open the url to test the build is openable in the local host browser.
+Next, we can confirm the amdcc local host is working (I confirmed it worked 2.14 6:35pm)
+run amupaupa gn
+Then, we run amdcc to stop that container.
+Then, we run upaupa publish. This public will run amc image as well, which will begin that container. 
+Then we run amupa am and open the url to test the build is openable in the local host browser. (I confirmed it worked 2.14 6:39pm)
+To confirm: I will be running all this, not you.
